@@ -1,0 +1,58 @@
+.sidebar {
+  width: 280px;
+  background-color: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.rooms-section, .users-section {
+  margin-bottom: 2rem;
+}
+
+.rooms-section h3, .users-section h3 {
+  color: var(--text);
+  margin-bottom: 1rem;
+  font-size: 0.875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.room-button {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  border-radius: 0.5rem;
+  background-color: transparent;
+  color: var(--text);
+  border: none;
+  cursor: pointer;
+  transition: var(--transition);
+  width: 100%;
+}
+
+.room-button:hover {
+  background-color: var(--hover);
+}
+
+.room-button.active {
+  background-color: var(--accent);
+  color: #ffffff;
+}
+
+.user-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  background-color: var(--secondary);
+  color: var(--text);
+  font-size: 0.875rem;
+}
+
+.online-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #10b981;
+}

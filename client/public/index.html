@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#000000" />
+    <meta
+      name="description"
+      content="Real-time chat application with dark and light mode support"
+    />
+    <title>ChatApp - Real-time Chat</title>
+    <script>
+      // Dynamically point the frontend to the backend on the same LAN host
+      // Can be overridden by setting window.__API_BASE__ before this script
+      (function () {
+        var host = window.location.hostname;
+        var api = 'http://' + host + ':5000';
+        if (typeof window.__API_BASE__ === 'undefined') {
+          window.__API_BASE__ = api;
+        }
+        // Optional: expose for quick debugging
+        console.log('[API_BASE]', window.__API_BASE__);
+      })();
+    </script>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+  </body>
+</html>

@@ -1,0 +1,1525 @@
+﻿import React, { useState, useContext, useEffect, useRef } from 'react';
+import { useTheme } from '../context/useTheme';
+import { ChatContext } from '../context/ChatContext';
+import { Send, Mic, Square, Play, Pause, X, Smile, Paperclip, PhoneCall, PhoneOff, MicOff } from 'lucide-react';
+import { API_BASE } from '../api';
+import RoomDetails from './RoomDetails';
+import './ChatWindow.css';
+
+const ChatWindow = ({ socket }) => {
+  const theme = useTheme();
+  const { currentRoom, messages, setMessages, currentUser, currentDM, typingRoom, typingDM, onlineUsers, loadingMessages, setSelectedProfileUser, blockedUsers, setBlockedUsers } = useContext(ChatContext);
+  const [messageInput, setMessageInput] = useState('');
+  const messagesContainerRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
+  const loadingIntervalRef = useRef(null);
+  const loadingFinishTimeoutRef = useRef(null);
+  const [hoveredMessageId, setHoveredMessageId] = useState(null);
+  const [uploadingAttachment, setUploadingAttachment] = useState(null);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [callStatus, setCallStatus] = useState('idle'); // 'idle' | 'calling' | 'ringing' | 'in-call'
+  const [callPartnerId, setCallPartnerId] = useState(null);
+  const [incomingOffer, setIncomingOffer] = useState(null);
+  const localAudioRef = useRef(null);
+  const remoteAudioRef = useRef(null);
+  const pcRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const [isMuted, setIsMuted] = useState(false);
+  const [callNote, setCallNote] = useState('');
+  const [messageMenuId, setMessageMenuId] = useState(null);
+  const [dmPartnerLastSeen, setDmPartnerLastSeen] = useState(null);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [showRoomDetails, setShowRoomDetails] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const [audioBlob, setAudioBlob] = useState(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const recordingIntervalRef = useRef(null);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const inputRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const loadingPercent = Math.max(0, Math.min(100, Math.round(loadingProgress)));
+
+  const scrollToEnd = (smooth = true) => {
+    try {
+      const el = messagesContainerRef.current;
+      if (el) {
+        el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    scrollToEnd(true);
+  }, [messages]);
+
+  // Jump to bottom when entering a DM or room
+  useEffect(() => {
+    setTimeout(() => scrollToEnd(false), 0);
+  }, [currentDM, currentRoom]);
+
+  // Fetch blocked users on mount
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    fetch(`${API_BASE}/api/friends/blocked/${currentUser.id}`)
+      .then(res => res.json())
+      .then(data => {
+        setBlockedUsers(Array.isArray(data) ? data.map(u => u._id) : []);
+      })
+      .catch(() => {});
+  }, [currentUser?.id, setBlockedUsers]);
+
+  // Recording timer
+  useEffect(() => {
+    if (isRecording) {
+      recordingIntervalRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
+    } else {
+      if (recordingIntervalRef.current) {
+        clearInterval(recordingIntervalRef.current);
+      }
+      setRecordingTime(0);
+    }
+    return () => {
+      if (recordingIntervalRef.current) {
+        clearInterval(recordingIntervalRef.current);
+      }
+    };
+  }, [isRecording]);
+
+  // After loading finishes and loader disappears, ensure bottom
+  useEffect(() => {
+    if (!loadingMessages && loadingProgress === 0) {
+      setTimeout(() => scrollToEnd(false), 0);
+    }
+  }, [loadingMessages, loadingProgress]);
+
+  // Reset menu when switching context
+  useEffect(() => {
+    setMessageMenuId(null);
+    setHoveredMessageId(null);
+  }, [currentDM, currentRoom]);
+
+  // Smooth pseudo progress for message loading
+  useEffect(() => {
+    if (!loadingMessages) return undefined;
+
+    if (loadingFinishTimeoutRef.current) {
+      clearTimeout(loadingFinishTimeoutRef.current);
+      loadingFinishTimeoutRef.current = null;
+    }
+    setLoadingProgress(5);
+
+    loadingIntervalRef.current = setInterval(() => {
+      setLoadingProgress(prev => {
+        if (prev >= 92) return prev;
+        const increment = 4 + Math.random() * 6;
+        return Math.min(prev + increment, 92);
+      });
+    }, 160);
+
+    return () => {
+      if (loadingIntervalRef.current) {
+        clearInterval(loadingIntervalRef.current);
+        loadingIntervalRef.current = null;
+      }
+    };
+  }, [loadingMessages]);
+
+  useEffect(() => {
+    if (loadingMessages) return undefined;
+
+    if (loadingIntervalRef.current) {
+      clearInterval(loadingIntervalRef.current);
+      loadingIntervalRef.current = null;
+    }
+    if (loadingProgress === 0) return undefined;
+
+    setLoadingProgress(100);
+    loadingFinishTimeoutRef.current = setTimeout(() => {
+      setLoadingProgress(0);
+      loadingFinishTimeoutRef.current = null;
+    }, 320);
+
+    return () => {
+      if (loadingFinishTimeoutRef.current) {
+        clearTimeout(loadingFinishTimeoutRef.current);
+        loadingFinishTimeoutRef.current = null;
+      }
+    };
+  }, [loadingMessages, loadingProgress]);
+
+  useEffect(() => () => {
+    if (loadingIntervalRef.current) clearInterval(loadingIntervalRef.current);
+    if (loadingFinishTimeoutRef.current) clearTimeout(loadingFinishTimeoutRef.current);
+  }, []);
+
+  // Fetch blocked users list on mount
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    fetch(`${API_BASE}/api/friends/blocked/${currentUser.id}`)
+      .then(res => res.json())
+      .then(data => {
+        setBlockedUsers(Array.isArray(data) ? data.map(u => u._id) : []);
+      })
+      .catch(() => {});
+  }, [currentUser?.id]);
+
+  // Fetch DM partner's last seen (only if offline)
+  useEffect(() => {
+    if (!currentDM?.userId) {
+      setDmPartnerLastSeen(null);
+      return;
+    }
+    // Check if user is online
+    const isOnline = Array.isArray(onlineUsers) && onlineUsers.some(u => u.userId === currentDM.userId);
+    if (isOnline) {
+      setDmPartnerLastSeen(null);
+      return;
+    }
+    // Only fetch last seen if offline
+    fetch(`${API_BASE}/api/users/${currentDM.userId}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.lastSeen) setDmPartnerLastSeen(data.lastSeen);
+      })
+      .catch(() => {});
+  }, [currentDM, onlineUsers]);
+
+  // Close menu on click outside
+  useEffect(() => {
+    const handleClickOutside = () => setMessageMenuId(null);
+    if (messageMenuId) {
+      document.addEventListener('click', handleClickOutside);
+      return () => document.removeEventListener('click', handleClickOutside);
+    }
+  }, [messageMenuId]);
+
+  const handleSendMessage = async (e) => {
+    e.preventDefault();
+    if (!messageInput.trim() || !currentUser) return;
+
+    // DM
+    if (currentDM) {
+      const tempId = 'tmp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+      const optimistic = {
+        tempId,
+        sender: { _id: currentUser.id, username: currentUser.username, avatar: currentUser.avatar },
+        senderName: currentUser.username,
+        receiver: currentDM.userId,
+        content: messageInput,
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, optimistic]);
+      scrollToEnd();
+      const contentToSend = messageInput;
+      setMessageInput('');
+
+      try {
+        if (socket && socket.connected) {
+          socket.emit('send_dm', {
+            senderId: currentUser.id,
+            senderName: currentUser.username,
+            receiverId: currentDM.userId,
+            content: contentToSend,
+            tempId
+          });
+        }
+        const res = await fetch(`${API_BASE}/api/dm/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ senderId: currentUser.id, receiverId: currentDM.userId, content: contentToSend })
+        });
+        const data = await res.json();
+        if (!res.ok && (data?.error === 'blocked' || res.status === 403)) {
+          setMessages(prev => prev.map(m => (
+            m.tempId === tempId
+              ? {
+                  tempId,
+                  sender: { _id: currentUser.id, username: currentUser.username },
+                  senderName: currentUser.username,
+                  receiver: currentDM.userId,
+                  content: 'Message failed to send',
+                  status: 'error',
+                  timestamp: new Date()
+                }
+              : m
+          )));
+        } else {
+          setMessages(prev => prev.map(m => (m.tempId === tempId ? data : m)));
+        }
+        scrollToEnd();
+      } catch (err) {
+        console.error('Error sending DM:', err);
+      }
+      return;
+    }
+
+    // Room
+    if (socket && currentRoom) {
+      const tempId = 'tmp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+      const optimistic = {
+        tempId,
+        sender: currentUser.id,
+        senderName: currentUser.username,
+        room: currentRoom,
+        content: messageInput,
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, optimistic]);
+      socket.emit('send_message', {
+        content: messageInput,
+        room: currentRoom,
+        sender: currentUser.id,
+        senderName: currentUser.username,
+        tempId
+      });
+      setMessageInput('');
+      scrollToEnd();
+    }
+  };
+
+  // Emit typing (debounced)
+  const emitTyping = (isTyping) => {
+    if (!socket || !currentUser) return;
+    if (currentDM) {
+      socket.emit('typing_dm', { toUserId: currentDM.userId, fromUserId: currentUser.id, username: currentUser.username, isTyping });
+    } else if (currentRoom) {
+      socket.emit('typing', { room: currentRoom, userId: currentUser.id, username: currentUser.username, isTyping });
+    }
+  };
+
+  const handleInputChange = (e) => {
+    const val = e.target.value;
+    setMessageInput(val);
+    emitTyping(true);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => emitTyping(false), 1000);
+  };
+
+  const insertEmoji = (emoji) => {
+    try {
+      const input = inputRef.current;
+      const start = input ? input.selectionStart : messageInput.length;
+      const end = input ? input.selectionEnd : start;
+      const next = (messageInput || '').slice(0, start) + emoji + (messageInput || '').slice(end);
+      setMessageInput(next);
+      setShowEmojiPicker(false);
+      setTimeout(() => {
+        if (input) {
+          input.focus();
+          const pos = start + emoji.length;
+          input.setSelectionRange(pos, pos);
+        }
+      }, 0);
+    } catch {}
+  };
+
+  // WebRTC helpers
+  const createPeerConnection = () => {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+    pc.onicecandidate = (event) => {
+      if (event.candidate && socket && currentDM) {
+        socket.emit('rtc_ice_candidate', { toUserId: currentDM.userId, fromUserId: currentUser.id, candidate: event.candidate });
+      }
+    };
+    pc.ontrack = (event) => {
+      const [stream] = event.streams;
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.srcObject = stream;
+        // Try to autoplay remote audio when available
+        const playPromise = remoteAudioRef.current.play();
+        if (playPromise && typeof playPromise.then === 'function') {
+          playPromise.catch(() => {/* ignore autoplay rejection */});
+        }
+      }
+    };
+    pcRef.current = pc;
+    return pc;
+  };
+
+  const getLocalAudio = async () => {
+    // Hint: Some browsers require an explicit permission prompt message
+    setCallNote('Requesting microphone permissionâ€¦');
+    if (navigator.permissions && navigator.permissions.query) {
+      try {
+        const status = await navigator.permissions.query({ name: 'microphone' });
+        console.log('[RTC] mic permission status:', status.state);
+        if (status.state === 'denied') {
+          setCallNote('Microphone permission denied. Enable it in browser settings.');
+        } else if (status.state === 'prompt') {
+          setCallNote('Please allow microphone to start the call.');
+        } else {
+          setCallNote('Microphone granted. Connectingâ€¦');
+        }
+      } catch {}
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    localStreamRef.current = stream;
+    if (localAudioRef.current) localAudioRef.current.srcObject = stream;
+    return stream;
+  };
+
+  const startCall = async () => {
+    if (!socket || !currentDM || !currentUser) return;
+    try {
+      setCallPartnerId(currentDM.userId);
+      setCallStatus('calling');
+      setCallNote('Callingâ€¦');
+      const pc = createPeerConnection();
+      const localStream = await getLocalAudio();
+      if (!localStream || localStream.getAudioTracks().length === 0) {
+        setCallNote('No microphone detected.');
+      }
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit('rtc_call_request', { toUserId: currentDM.userId, fromUserId: currentUser.id, offer });
+    } catch (err) {
+      console.error('startCall error', err);
+      setCallNote('Failed to start call: ' + (err?.message || 'unknown error'));
+      setCallStatus('idle');
+    }
+  };
+
+  const acceptCall = async (offer, fromUserId) => {
+    if (!socket || !currentUser) return;
+    try {
+      setCallPartnerId(fromUserId);
+      setCallStatus('in-call');
+      setCallNote('Connectingâ€¦');
+      const pc = createPeerConnection();
+      const localStream = await getLocalAudio();
+      if (!localStream || localStream.getAudioTracks().length === 0) {
+        setCallNote('No microphone detected.');
+      }
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit('rtc_call_answer', { toUserId: fromUserId, fromUserId: currentUser.id, answer });
+      setIncomingOffer(null);
+    } catch (err) {
+      console.error('acceptCall error', err);
+      setCallNote('Failed to accept call: ' + (err?.message || 'unknown error'));
+      setCallStatus('idle');
+    }
+  };
+
+  const endCall = () => {
+    try {
+      if (socket && callPartnerId) {
+        socket.emit('rtc_call_end', { toUserId: callPartnerId, fromUserId: currentUser.id });
+      }
+    } catch {}
+    setCallStatus('idle');
+    setCallPartnerId(null);
+    setCallNote('');
+    if (pcRef.current) {
+      try { pcRef.current.close(); } catch {}
+      pcRef.current = null;
+    }
+    if (localStreamRef.current) {
+      try { localStreamRef.current.getTracks().forEach(t => t.stop()); } catch {}
+      localStreamRef.current = null;
+    }
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = null;
+    }
+  };
+
+  const toggleMute = () => {
+    setIsMuted(prev => {
+      const next = !prev;
+      const stream = localStreamRef.current;
+      if (stream) stream.getAudioTracks().forEach(t => t.enabled = !next);
+      return next;
+    });
+  };
+
+  // Socket listeners for RTC
+  useEffect(() => {
+    if (!socket) return;
+    const onIncomingCall = async ({ fromUserId, offer }) => {
+      // Only ring if this is the active DM partner
+      if (!currentDM || currentDM.userId !== fromUserId) return;
+      setCallStatus('ringing');
+      setIncomingOffer({ offer, fromUserId });
+    };
+    const onCallAnswer = async ({ fromUserId, answer }) => {
+      try {
+        if (pcRef.current) {
+          await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+          setCallStatus('in-call');
+          setCallNote('Connected.');
+        }
+      } catch (err) {
+        console.error('onCallAnswer error', err);
+        setCallNote('Answer failed: ' + (err?.message || 'unknown error'));
+      }
+    };
+    const onIceCandidate = async ({ fromUserId, candidate }) => {
+      try {
+        if (pcRef.current) {
+          await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+        }
+      } catch (err) {
+        console.error('addIceCandidate error', err);
+      }
+    };
+    const onCallEnd = () => endCall();
+
+    socket.on('rtc_incoming_call', onIncomingCall);
+    socket.on('rtc_call_answer', onCallAnswer);
+    socket.on('rtc_ice_candidate', onIceCandidate);
+    socket.on('rtc_call_end', onCallEnd);
+    return () => {
+      socket.off('rtc_incoming_call', onIncomingCall);
+      socket.off('rtc_call_answer', onCallAnswer);
+      socket.off('rtc_ice_candidate', onIceCandidate);
+      socket.off('rtc_call_end', onCallEnd);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socket, currentDM?.userId]);
+
+  const onAttachClick = () => {
+    try {
+      fileInputRef.current?.click();
+    } catch {}
+  };
+
+  const onFileSelected = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const maxSizeMB = 10;
+    if (file.size > maxSizeMB * 1024 * 1024) {
+      alert(`File too large. Maximum size is ${maxSizeMB}MB`);
+      e.target.value = '';
+      return;
+    }
+    const mime = file.type || 'application/octet-stream';
+    const name = file.name;
+    const size = file.size;
+    let kind = 'file';
+    if (mime.startsWith('image/')) kind = 'image';
+    else if (mime.startsWith('video/')) kind = 'video';
+    
+    // Read file for preview
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setSelectedFile({
+        base64: reader.result,
+        mime,
+        name,
+        size,
+        kind
+      });
+      e.target.value = '';
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const sendSelectedFile = async () => {
+    if (!selectedFile) return;
+    const { base64, mime, name, size, kind } = selectedFile;
+    setSelectedFile(null);
+    await sendAttachmentData(base64, mime, name, size, kind);
+  };
+
+  const cancelSelectedFile = () => {
+    setSelectedFile(null);
+  };
+
+  const sendAttachmentData = async (base64, mime, name, size, kind) => {
+    let success = false;
+    setUploadingAttachment({ name, size, kind, status: 'sending' });
+    // DM
+    if (currentDM) {
+      const tempId = 'tmp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+      const optimistic = {
+        tempId,
+        sender: { _id: currentUser.id, username: currentUser.username, avatar: currentUser.avatar },
+        senderName: currentUser.username,
+        receiver: currentDM.userId,
+        content: base64,
+        type: kind,
+        fileName: name,
+        mimeType: mime,
+        fileSize: size,
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, optimistic]);
+      scrollToEnd();
+      try {
+        const payload = JSON.stringify({ senderId: currentUser.id, receiverId: currentDM.userId, content: base64, type: kind, fileName: name, mimeType: mime, fileSize: size, tempId });
+        console.log('[sendAttachment] Payload size:', Math.round(payload.length / 1024), 'KB');
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
+        
+        const res = await fetch(`${API_BASE}/api/dm/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!res.ok) {
+          const errorText = await res.text();
+          console.error('[sendAttachmentData] Server error:', res.status, errorText);
+          throw new Error(`Server returned ${res.status}`);
+        }
+        const data = await res.json();
+        if (data?.error === 'blocked') {
+          setMessages(prev => prev.map(m => (
+            m.tempId === tempId
+              ? {
+                  tempId,
+                  sender: { _id: currentUser.id, username: currentUser.username },
+                  senderName: currentUser.username,
+                  receiver: currentDM.userId,
+                  content: 'Message failed to send',
+                  status: 'error',
+                  timestamp: new Date()
+                }
+              : m
+          )));
+        } else {
+          setMessages(prev => prev.map(m => (m.tempId === tempId ? data : m)));
+          success = true;
+        }
+        scrollToEnd();
+      } catch (err) {
+        console.error('Error sending attachment DM:', err);
+        if (err.name === 'AbortError') {
+          alert('Upload timed out. File may be too large or connection is slow.');
+        } else if (err.message.includes('413')) {
+          alert('File too large for server. Try a smaller file.');
+        }
+      }
+      if (success) {
+        setUploadingAttachment({ name, size, kind, status: 'sent' });
+        setTimeout(() => setUploadingAttachment(null), 1200);
+      } else {
+        setUploadingAttachment({ name, size, kind, status: 'error' });
+      }
+      return success;
+    }
+
+    // Room
+    if (socket && currentRoom) {
+      const tempId = 'tmp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+      const optimistic = {
+        tempId,
+        sender: currentUser.id,
+        senderName: currentUser.username,
+        room: currentRoom,
+        content: base64,
+        type: kind,
+        fileName: name,
+        mimeType: mime,
+        fileSize: size,
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, optimistic]);
+      socket.emit('send_message', {
+        content: base64,
+        type: kind,
+        fileName: name,
+        mimeType: mime,
+        fileSize: size,
+        room: currentRoom,
+        sender: currentUser.id,
+        senderName: currentUser.username,
+        tempId
+      });
+      scrollToEnd();
+      success = true;
+    }
+    if (success) {
+      setUploadingAttachment({ name, size, kind, status: 'sent' });
+      setTimeout(() => setUploadingAttachment(null), 1200);
+    } else {
+      setUploadingAttachment({ name, size, kind, status: 'error' });
+    }
+    return success;
+  };
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        setAudioBlob(audioBlob);
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      console.error('Error accessing microphone:', err);
+      alert('Could not access microphone. Please grant permission.');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  const sendRecordingDirectly = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      // Stop recording and immediately send
+      mediaRecorderRef.current.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+        setIsRecording(false);
+        
+        // Send immediately
+        const reader = new FileReader();
+        reader.readAsDataURL(audioBlob);
+        reader.onloadend = async () => {
+          const base64Audio = reader.result;
+          const duration = recordingTime;
+          await sendAudioMessageData(base64Audio, duration);
+        };
+      };
+      mediaRecorderRef.current.stop();
+    }
+  };
+
+  const cancelRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+    setAudioBlob(null);
+    audioChunksRef.current = [];
+  };
+
+  const sendAudioMessage = async () => {
+    if (!audioBlob || !currentUser) return;
+
+    const reader = new FileReader();
+    reader.readAsDataURL(audioBlob);
+    reader.onloadend = async () => {
+      const base64Audio = reader.result;
+      const duration = recordingTime;
+      await sendAudioMessageData(base64Audio, duration);
+      setAudioBlob(null);
+    };
+  };
+
+  const sendAudioMessageData = async (base64Audio, duration) => {
+
+      // DM
+      if (currentDM) {
+        const tempId = 'tmp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+        const optimistic = {
+          tempId,
+          sender: { _id: currentUser.id, username: currentUser.username, avatar: currentUser.avatar },
+          senderName: currentUser.username,
+          receiver: currentDM.userId,
+          content: base64Audio,
+          type: 'audio',
+          duration,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, optimistic]);
+        scrollToEnd();
+        setAudioBlob(null);
+
+        try {
+          if (socket && socket.connected) {
+            socket.emit('send_dm', {
+              senderId: currentUser.id,
+              senderName: currentUser.username,
+              receiverId: currentDM.userId,
+              content: base64Audio,
+              type: 'audio',
+              duration,
+              tempId
+            });
+          }
+          const res = await fetch(`${API_BASE}/api/dm/send`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ senderId: currentUser.id, receiverId: currentDM.userId, content: base64Audio, type: 'audio', duration })
+          });
+          const data = await res.json();
+          if (!res.ok && (data?.error === 'blocked' || res.status === 403)) {
+            setMessages(prev => prev.map(m => (
+              m.tempId === tempId
+                ? {
+                    tempId,
+                    sender: { _id: currentUser.id, username: currentUser.username },
+                    senderName: currentUser.username,
+                    receiver: currentDM.userId,
+                    content: 'Message failed to send',
+                    status: 'error',
+                    timestamp: new Date()
+                  }
+                : m
+            )));
+          } else {
+            setMessages(prev => prev.map(m => (m.tempId === tempId ? data : m)));
+          }
+          scrollToEnd();
+        } catch (err) {
+          console.error('Error sending audio DM:', err);
+        }
+        return;
+      }
+
+      // Room
+      if (socket && currentRoom) {
+        const tempId = 'tmp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+        const optimistic = {
+          tempId,
+          sender: currentUser.id,
+          senderName: currentUser.username,
+          room: currentRoom,
+          content: base64Audio,
+          type: 'audio',
+          duration,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, optimistic]);
+        socket.emit('send_message', {
+          content: base64Audio,
+          type: 'audio',
+          duration,
+          room: currentRoom,
+          sender: currentUser.id,
+          senderName: currentUser.username,
+          tempId
+        });
+        setAudioBlob(null);
+        scrollToEnd();
+      }
+  };
+
+  // Determine typing text or last seen
+  const typingText = () => {
+    if (currentDM && typingDM?.[currentDM.userId]?.isTyping) {
+      return `${typingDM[currentDM.userId].username} is typing...`;
+    }
+    const othersTyping = Array.isArray(typingRoom) ? typingRoom.filter(u => u !== currentUser?.username) : [];
+    if (!currentDM && othersTyping.length > 0) {
+      return `${othersTyping.join(', ')} typing...`;
+    }
+    return '';
+  };
+
+  const getLastSeenText = () => {
+    if (!currentDM) return '';
+    
+    // If we blocked this user, don't show any status info
+    const isBlockedByUs = blockedUsers.includes(currentDM.userId);
+    
+    // Debug logging
+    console.log('[ChatWindow] getLastSeenText check:', {
+      currentDMUserId: currentDM.userId,
+      blockedUsers: blockedUsers,
+      isBlockedByUs: isBlockedByUs
+    });
+    
+    if (isBlockedByUs) return '';
+    
+    // Check if user is currently online
+    const isOnline = Array.isArray(onlineUsers) && onlineUsers.some(u => u.userId === currentDM.userId);
+    if (isOnline) return 'online';
+    
+    // If offline, show last seen
+    if (!dmPartnerLastSeen) return '';
+    const now = new Date();
+    const lastSeen = new Date(dmPartnerLastSeen);
+    const diffMs = now - lastSeen;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+    
+    if (diffMins < 1) return 'last seen just now';
+    if (diffMins < 60) return `last seen ${diffMins}m ago`;
+    if (diffHours < 24) return `last seen ${diffHours}h ago`;
+    if (diffDays === 1) return 'last seen yesterday';
+    if (diffDays < 7) return `last seen ${diffDays}d ago`;
+    return `last seen ${lastSeen.toLocaleDateString()}`;
+  };
+
+  const handleDeleteMessage = async (msgId, scope = 'self') => {
+    if (!currentDM || !currentUser || !msgId) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/dm/deleteMessages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUser.id, messageIds: [msgId], scope })
+      });
+      if (res.ok) {
+        setMessages(prev => prev.filter(m => m._id !== msgId));
+        setMessageMenuId(null);
+      }
+    } catch (err) {
+      console.error('Error deleting message:', err);
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', flex: 1, minWidth: 0, backgroundColor: theme.colors.background }}>
+      {/* Header */}
+      <div style={{ padding: '1rem', borderBottom: `1px solid ${theme.colors.border}`, backgroundColor: theme.colors.surface, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <div style={{ width: '36px', height: '36px', borderRadius: '50%', backgroundColor: '#6b7280', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontSize: '0.875rem', fontWeight: '600' }}>
+            {currentDM ? (currentDM.avatar ? <img src={currentDM.avatar} alt="" style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }} /> : (currentDM.username?.[0]?.toUpperCase() || '?')) : '#'}
+          </div>
+          <div>
+            <h2
+              style={{ margin: 0, fontSize: '1rem', color: theme.colors.text, cursor: currentDM || currentRoom ? 'pointer' : 'default' }}
+              onClick={() => {
+                if (currentDM?.userId) {
+                  setSelectedProfileUser(currentDM.userId);
+                } else if (currentRoom) {
+                  setShowRoomDetails(true);
+                }
+              }}
+              title={currentDM ? 'View profile' : currentRoom ? 'Room details' : undefined}
+            >
+              {currentDM ? `${currentDM.username}` : `#${currentRoom}`}
+            </h2>
+            <p style={{ margin: 0, fontSize: '0.75rem', opacity: 0.7, color: theme.colors.textMuted }}>{typingText() || (currentDM && getLastSeenText())}</p>
+          </div>
+        </div>
+        {currentDM && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <button
+              type="button"
+              onClick={callStatus === 'idle' ? startCall : undefined}
+              style={{
+                padding: '0.5rem 0.75rem',
+                borderRadius: '0.75rem',
+                backgroundColor: theme.colors.surface,
+                color: theme.colors.accent,
+                display: 'flex',
+                alignItems: 'center',
+                border: `1px solid ${theme.colors.border}`,
+                cursor: callStatus === 'idle' ? 'pointer' : 'not-allowed',
+                opacity: callStatus === 'idle' ? 1 : 0.5
+              }}
+              title={callStatus === 'idle' ? 'Start voice call' : 'Call in progress'}
+            >
+              <PhoneCall size={18} />
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Messages */}
+      <div ref={messagesContainerRef} style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '2rem 2rem 1rem 2rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        {(loadingMessages || loadingProgress > 0) ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+            <div style={{ width: 'min(440px, 100%)', padding: '1.25rem', borderRadius: '0.75rem', border: `1px solid ${theme.colors.border}`, backgroundColor: theme.colors.surface, boxShadow: '0 8px 18px rgba(0,0,0,0.08)', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: theme.colors.text }}>
+                <span style={{ fontWeight: 600 }}>Loading messages</span>
+                <span style={{ fontVariantNumeric: 'tabular-nums' }}>{loadingPercent}%</span>
+              </div>
+              <div style={{ width: '100%', height: '10px', borderRadius: '999px', backgroundColor: theme.colors.border, overflow: 'hidden' }}>
+                <div style={{ width: `${loadingPercent}%`, height: '100%', borderRadius: 'inherit', background: `linear-gradient(90deg, ${theme.colors.accent} 0%, ${theme.colors.accent}dd 100%)`, transition: 'width 160ms ease' }} />
+              </div>
+              <p style={{ margin: 0, fontSize: '0.9rem', color: theme.colors.textMuted }}>Fetching historyâ€¦</p>
+            </div>
+          </div>
+        ) : messages.length === 0 ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: theme.colors.textMuted }}>
+            <p>No messages yet. Start the conversation!</p>
+          </div>
+        ) : (
+          messages.map((msg, idx) => {
+            const senderName = msg.senderName || msg.sender?.username;
+            const isCurrentUser = senderName === currentUser?.username;
+            const showMenu = currentDM && msg._id && (hoveredMessageId === msg._id || messageMenuId === msg._id);
+            return (
+              <div key={msg._id || msg.tempId || idx} style={{ display: 'flex', flexDirection: isCurrentUser ? 'row-reverse' : 'row', gap: '0.5rem', alignItems: 'flex-start' }}>
+                <div
+                  onMouseEnter={() => msg._id && setHoveredMessageId(msg._id)}
+                  onMouseLeave={() => setHoveredMessageId(null)}
+                  style={{
+                    maxWidth: '60%',
+                    padding: '0.875rem 1.125rem',
+                    borderRadius: isCurrentUser ? '1.25rem 1.25rem 0.25rem 1.25rem' : '1.25rem 1.25rem 1.25rem 0.25rem',
+                    backgroundColor: msg.status === 'error' ? (isCurrentUser ? '#fee2e2' : theme.colors.border) : (isCurrentUser ? theme.colors.accent : theme.colors.surface),
+                    color: msg.status === 'error' ? (isCurrentUser ? '#991b1b' : theme.colors.textMuted) : (isCurrentUser ? '#ffffff' : theme.colors.text),
+                    wordWrap: 'break-word',
+                    overflowWrap: 'anywhere',
+                    position: 'relative',
+                    boxShadow: isCurrentUser 
+                      ? '0 2px 8px rgba(102, 126, 234, 0.25), 0 1px 3px rgba(0,0,0,0.1)'
+                      : '0 1px 3px rgba(0,0,0,0.1)',
+                    transition: 'transform 0.15s ease, box-shadow 0.15s ease',
+                    transform: hoveredMessageId === msg._id ? 'translateY(-1px)' : 'translateY(0)',
+                    fontStyle: msg.status === 'error' ? 'italic' : 'normal',
+                    opacity: msg.status === 'error' ? 0.8 : 1
+                  }}
+                >
+                  <p style={{ margin: '0 0 0.25rem 0', fontSize: '0.875rem', opacity: 0.8 }}>{senderName}</p>
+                  {msg.type === 'audio' ? (
+                    <AudioPlayer audioData={msg.content} duration={msg.duration} theme={theme} />
+                  ) : msg.type === 'image' ? (
+                    <img src={msg.content} alt={msg.fileName || 'image'} style={{ maxWidth: '320px', maxHeight: '240px', borderRadius: '0.5rem' }} />
+                  ) : msg.type === 'video' ? (
+                    <video src={msg.content} controls style={{ maxWidth: '360px', borderRadius: '0.5rem' }} />
+                  ) : msg.type === 'file' ? (
+                    <a href={msg.content} download={msg.fileName || 'file'} target="_blank" rel="noreferrer" style={{ color: isCurrentUser ? '#ffffff' : theme.colors.accent, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <Paperclip size={16} /> {msg.fileName || 'Download file'}{typeof msg.fileSize === 'number' ? ` (${Math.max(1, Math.round(msg.fileSize / 1024))} KB)` : ''}
+                    </a>
+                  ) : (
+                    <p style={{ margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{msg.content}</p>
+                  )}
+                  <div style={{ marginTop: '0.25rem', fontSize: '0.7rem', opacity: 0.75, textAlign: 'right' }}>
+                    {(() => {
+                      const d = msg.timestamp ? new Date(msg.timestamp) : new Date();
+                      const hh = String(d.getHours()).padStart(2, '0');
+                      const mm = String(d.getMinutes()).padStart(2, '0');
+                      return `${hh}:${mm}`;
+                    })()}
+                  </div>
+                  {showMenu && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setMessageMenuId(messageMenuId === msg._id ? null : msg._id); }}
+                      style={{
+                        position: 'absolute',
+                        top: '4px',
+                        right: isCurrentUser ? 'auto' : '4px',
+                        left: isCurrentUser ? '4px' : 'auto',
+                        background: 'rgba(0,0,0,0.5)',
+                        border: 'none',
+                        borderRadius: '50%',
+                        width: '24px',
+                        height: '24px',
+                        color: '#fff',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                      title="Options"
+                    >
+                      â‹¯
+                    </button>
+                  )}
+                </div>
+                {messageMenuId === msg._id && showMenu && (
+                  <div
+                    style={{
+                      backgroundColor: theme.colors.surface,
+                      border: `1px solid ${theme.colors.border}`,
+                      borderRadius: '0.5rem',
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                      padding: '0.25rem',
+                      minWidth: '140px'
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      style={{
+                        width: '100%',
+                        background: 'transparent',
+                        border: 'none',
+                        textAlign: 'left',
+                        padding: '0.5rem',
+                        color: theme.colors.text,
+                        cursor: 'pointer',
+                        fontSize: '0.875rem'
+                      }}
+                      onClick={() => handleDeleteMessage(msg._id, 'self')}
+                    >
+                      Delete for me
+                    </button>
+                    <button
+                      style={{
+                        width: '100%',
+                        background: 'transparent',
+                        border: 'none',
+                        textAlign: 'left',
+                        padding: '0.5rem',
+                        color: '#ef4444',
+                        cursor: 'pointer',
+                        fontSize: '0.875rem'
+                      }}
+                      onClick={() => handleDeleteMessage(msg._id, 'both')}
+                    >
+                      Delete for both
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+        
+      </div>
+
+      {/* Input */}
+      {selectedFile && (
+        <div style={{ padding: '1rem', borderTop: `1px solid ${theme.colors.border}`, backgroundColor: theme.colors.surface }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', border: `2px solid ${theme.colors.border}`, backgroundColor: theme.colors.background, borderRadius: '0.75rem', padding: '1rem' }}>
+            {selectedFile.kind === 'image' ? (
+              <img src={selectedFile.base64} alt="preview" style={{ width: '64px', height: '64px', borderRadius: '0.5rem', objectFit: 'cover' }} />
+            ) : selectedFile.kind === 'video' ? (
+              <div style={{ width: '64px', height: '64px', borderRadius: '0.5rem', backgroundColor: theme.colors.surface, display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.colors.accent, fontSize: '1.5rem' }}>â–¶</div>
+            ) : (
+              <div style={{ width: '64px', height: '64px', borderRadius: '0.5rem', backgroundColor: theme.colors.surface, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Paperclip size={28} style={{ color: theme.colors.accent }} />
+              </div>
+            )}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 600, color: theme.colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {selectedFile.name}
+              </div>
+              <div style={{ fontSize: '0.85rem', color: theme.colors.textMuted }}>
+                {Math.round(selectedFile.size / 1024)} KB
+              </div>
+            </div>
+            <button
+              onClick={cancelSelectedFile}
+              style={{
+                padding: '0.75rem 1.25rem',
+                borderRadius: '0.75rem',
+                backgroundColor: theme.colors.surface,
+                color: theme.colors.text,
+                border: `2px solid ${theme.colors.border}`,
+                cursor: 'pointer',
+                fontWeight: 600
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={sendSelectedFile}
+              style={{
+                padding: '0.75rem 1.5rem',
+                borderRadius: '0.75rem',
+                backgroundColor: theme.colors.accent,
+                color: '#ffffff',
+                border: 'none',
+                cursor: 'pointer',
+                fontWeight: 600,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem'
+              }}
+            >
+              <Send size={18} /> Send
+            </button>
+          </div>
+        </div>
+      )}
+
+      {uploadingAttachment && (
+        <div style={{ padding: '0 1rem', marginBottom: '0.25rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', border: `1px solid ${theme.colors.border}`, backgroundColor: theme.colors.surface, borderRadius: '0.75rem', padding: '0.75rem 1rem', boxShadow: '0 4px 10px rgba(0,0,0,0.06)' }}>
+            <Paperclip size={18} style={{ color: theme.colors.accent }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 600, color: theme.colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {uploadingAttachment.name}
+              </div>
+              <div style={{ fontSize: '0.85rem', color: uploadingAttachment.status === 'error' ? '#ef4444' : theme.colors.textMuted }}>
+                {uploadingAttachment.status === 'error' ? 'Failed to send' : uploadingAttachment.status === 'sent' ? 'Sent' : 'Sendingâ€¦'}
+              </div>
+            </div>
+            {uploadingAttachment.status !== 'error' ? (
+              uploadingAttachment.status === 'sent'
+                ? <div style={{ width: '18px', height: '18px', borderRadius: '50%', backgroundColor: theme.colors.accent, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: '0.75rem' }}>âœ“</div>
+                : <div style={{ width: '18px', height: '18px', borderRadius: '50%', backgroundColor: theme.colors.accent, opacity: 0.15, boxShadow: `0 0 0 6px ${theme.colors.accent}22` }} />
+            ) : null}
+          </div>
+        </div>
+      )}
+
+      {isRecording || audioBlob ? (
+        <div style={{ position: 'sticky', bottom: 0, zIndex: 5, display: 'flex', gap: '0.6rem', padding: '1rem', borderTop: `1px solid ${theme.colors.border}`, backgroundColor: theme.colors.surface, boxShadow: '0 -2px 8px rgba(0,0,0,0.05)', alignItems: 'center' }}>
+          {isRecording ? (
+            <>
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.875rem 1.25rem', borderRadius: '1.25rem', border: `2px solid #ef4444`, backgroundColor: theme.colors.background }}>
+                <div style={{ width: '12px', height: '12px', borderRadius: '50%', backgroundColor: '#ef4444', animation: 'pulse 1.5s ease-in-out infinite' }} />
+                <span style={{ color: theme.colors.text, fontWeight: '600' }}>Recording...</span>
+                <span style={{ color: theme.colors.textMuted, marginLeft: 'auto', fontVariantNumeric: 'tabular-nums' }}>
+                  {Math.floor(recordingTime / 60)}:{String(recordingTime % 60).padStart(2, '0')}
+                </span>
+              </div>
+              <button
+                onClick={sendRecordingDirectly}
+                style={{
+                  padding: '0.875rem',
+                  borderRadius: '1.25rem',
+                  backgroundColor: theme.colors.accent,
+                  color: '#ffffff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  border: 'none',
+                  cursor: 'pointer',
+                  minWidth: '48px'
+                }}
+                title="Send"
+              >
+                <Send size={20} />
+              </button>
+              <button
+                onClick={cancelRecording}
+                style={{
+                  padding: '0.875rem',
+                  borderRadius: '1.25rem',
+                  backgroundColor: '#ef4444',
+                  color: '#ffffff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  border: 'none',
+                  cursor: 'pointer',
+                  minWidth: '48px'
+                }}
+                title="Cancel"
+              >
+                <X size={20} />
+              </button>
+            </>
+          ) : (
+            <>
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.875rem 1.25rem', borderRadius: '1.25rem', border: `2px solid ${theme.colors.border}`, backgroundColor: theme.colors.background }}>
+                <Mic size={18} style={{ color: theme.colors.accent }} />
+                <span style={{ color: theme.colors.text }}>Audio message ready</span>
+                <span style={{ color: theme.colors.textMuted, marginLeft: 'auto', fontVariantNumeric: 'tabular-nums' }}>
+                  {Math.floor(recordingTime / 60)}:{String(recordingTime % 60).padStart(2, '0')}
+                </span>
+              </div>
+              <button
+                onClick={sendAudioMessage}
+                style={{
+                  padding: '0.875rem',
+                  borderRadius: '1.25rem',
+                  backgroundColor: theme.colors.accent,
+                  color: '#ffffff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  border: 'none',
+                  cursor: 'pointer',
+                  minWidth: '48px'
+                }}
+                title="Send"
+              >
+                <Send size={20} />
+              </button>
+              <button
+                onClick={() => setAudioBlob(null)}
+                style={{
+                  padding: '0.875rem',
+                  borderRadius: '1.25rem',
+                  backgroundColor: '#6b7280',
+                  color: '#ffffff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  border: 'none',
+                  cursor: 'pointer',
+                  minWidth: '48px'
+                }}
+                title="Cancel"
+              >
+                <X size={20} />
+              </button>
+            </>
+          )}
+        </div>
+      ) : (
+        <form onSubmit={handleSendMessage} style={{ position: 'sticky', bottom: 0, zIndex: 6, display: 'flex', gap: '0.6rem', padding: '1rem', borderTop: `1px solid ${theme.colors.border}`, backgroundColor: theme.colors.surface, boxShadow: '0 -2px 8px rgba(0,0,0,0.05)', alignItems: 'center' }}>
+          <div style={{ position: 'relative' }}>
+            <button
+              type="button"
+              onClick={() => setShowEmojiPicker(v => !v)}
+              style={{
+                padding: '0.75rem',
+                borderRadius: '1.25rem',
+                backgroundColor: theme.colors.surface,
+                color: theme.colors.accent,
+                display: 'flex',
+                alignItems: 'center',
+                border: `2px solid ${theme.colors.border}`,
+                cursor: 'pointer'
+              }}
+              title="Emoji"
+            >
+              <Smile size={18} />
+            </button>
+            {showEmojiPicker && (
+              <div style={{
+                position: 'absolute',
+                bottom: '3.25rem',
+                left: 0,
+                width: '280px',
+                maxHeight: '220px',
+                overflowY: 'auto',
+                backgroundColor: theme.colors.surface,
+                border: `1px solid ${theme.colors.border}`,
+                borderRadius: '0.75rem',
+                boxShadow: '0 10px 24px rgba(0,0,0,0.15)',
+                padding: '0.5rem',
+                zIndex: 9999
+              }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: '0.35rem' }}>
+                  {['ðŸ˜€','ðŸ˜ƒ','ðŸ˜„','ðŸ˜','ðŸ˜†','ðŸ˜…','ðŸ˜‚','ðŸ¤£','ðŸ˜Š','ðŸ™‚','ðŸ™ƒ','ðŸ˜‰','ðŸ˜','ðŸ˜˜','ðŸ˜—','ðŸ˜™','ðŸ˜‹','ðŸ˜›','ðŸ˜œ','ðŸ¤ª','ðŸ¤¨','ðŸ« ','ðŸ¤“','ðŸ˜Ž','ðŸ¥³','ðŸ˜¤','ðŸ˜®','ðŸ˜¯','ðŸ˜±','ðŸ˜´','ðŸ¤¤','ðŸ¤§','ðŸ¤¯','ðŸ¤ ','ðŸ˜‡','ðŸ¥°','ðŸ¤—','ðŸ¤­','ðŸ˜','ðŸ˜¶','ðŸ˜','ðŸ˜’','ðŸ™„','ðŸ˜¬','ðŸ˜­','ðŸ˜¤','ðŸ˜¡','ðŸ‘','ðŸ‘Ž','ðŸ‘','ðŸ™','ðŸ’ª','ðŸ”¥','â¤ï¸','ðŸ’–','ðŸ’™','ðŸ’š','ðŸ’›','ðŸ’œ','ðŸ–¤','ðŸ¤','âœ¨','ðŸŒŸ','â­','ðŸŽ‰','ðŸŽŠ'].map(e => (
+                    <button key={e} type="button" onClick={() => insertEmoji(e)} style={{
+                      background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '1.2rem', lineHeight: 1
+                    }}>{e}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={onAttachClick}
+            style={{
+              padding: '0.75rem',
+              borderRadius: '1.25rem',
+              backgroundColor: theme.colors.surface,
+              color: theme.colors.accent,
+              display: 'flex',
+              alignItems: 'center',
+              border: `2px solid ${theme.colors.border}`,
+              cursor: 'pointer'
+            }}
+            title="Attach file"
+          >
+            <Paperclip size={18} />
+          </button>
+          <input 
+            type="text" 
+            value={messageInput} 
+            onChange={handleInputChange} 
+            placeholder="Type your message..." 
+            style={{ 
+              flex: 1, 
+              padding: '0.875rem 1.25rem', 
+              borderRadius: '1.25rem', 
+              border: `2px solid ${theme.colors.border}`, 
+              backgroundColor: theme.colors.background, 
+              color: theme.colors.text, 
+              outline: 'none',
+              transition: 'all 0.2s ease',
+              fontSize: '0.9375rem'
+            }} 
+            ref={inputRef}
+            onFocus={(e) => e.target.style.borderColor = theme.colors.accent}
+            onBlur={(e) => e.target.style.borderColor = theme.colors.border}
+          />
+          {currentDM && (
+            <button
+              type="button"
+              onClick={callStatus === 'idle' ? startCall : undefined}
+              style={{
+                padding: '0.75rem',
+                borderRadius: '1.25rem',
+                backgroundColor: theme.colors.surface,
+                color: theme.colors.accent,
+                display: 'flex',
+                alignItems: 'center',
+                border: `2px solid ${theme.colors.border}`,
+                cursor: callStatus === 'idle' ? 'pointer' : 'not-allowed',
+                opacity: callStatus === 'idle' ? 1 : 0.5
+              }}
+              title={callStatus === 'idle' ? 'Start voice call' : 'Call in progress'}
+            >
+              <PhoneCall size={18} />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={startRecording}
+            style={{
+              padding: '0.875rem 1.5rem',
+              borderRadius: '1.25rem',
+              backgroundColor: theme.colors.surface,
+              color: theme.colors.accent,
+              display: 'flex',
+              alignItems: 'center',
+              border: `2px solid ${theme.colors.border}`,
+              cursor: 'pointer',
+              transition: 'all 0.2s ease'
+            }}
+            title="Record audio message"
+          >
+            <Mic size={18} />
+          </button>
+          <button 
+            type="submit" 
+            style={{ 
+              padding: '0.875rem 1.5rem', 
+              borderRadius: '1.25rem', 
+              backgroundColor: theme.colors.accent, 
+              color: '#ffffff', 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: '0.5rem',
+              border: 'none',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease',
+              boxShadow: '0 2px 8px rgba(102, 126, 234, 0.3)',
+              fontWeight: '600'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = 'translateY(-2px)';
+              e.currentTarget.style.boxShadow = '0 4px 12px rgba(102, 126, 234, 0.4)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'translateY(0)';
+              e.currentTarget.style.boxShadow = '0 2px 8px rgba(102, 126, 234, 0.3)';
+            }}
+          >
+            <Send size={18} />
+          </button>
+          <input
+            type="file"
+            ref={fileInputRef}
+            style={{ display: 'none' }}
+            onChange={onFileSelected}
+            accept="image/*,video/*,.pdf,.txt,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+          />
+        </form>
+      )}
+
+      {/* Incoming Call Modal */}
+      {callStatus === 'ringing' && incomingOffer && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 }}>
+          <div style={{ background: theme.colors.surface, color: theme.colors.text, border: `1px solid ${theme.colors.border}`, borderRadius: '0.75rem', padding: '1rem', width: 'min(360px, 92vw)' }}>
+            <h3 style={{ margin: 0 }}>Incoming call</h3>
+            <p style={{ marginTop: '0.5rem', color: theme.colors.textMuted }}>{currentDM?.username} is callingâ€¦</p>
+            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
+              <button onClick={() => acceptCall(incomingOffer.offer, incomingOffer.fromUserId)} style={{ flex: 1, padding: '0.75rem', borderRadius: '0.5rem', background: theme.colors.accent, color: '#fff', border: 'none', cursor: 'pointer' }}>Accept</button>
+              <button onClick={endCall} style={{ flex: 1, padding: '0.75rem', borderRadius: '0.5rem', background: theme.colors.surface, color: theme.colors.text, border: `1px solid ${theme.colors.border}`, cursor: 'pointer' }}>Decline</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* In-Call Controls */}
+      {callStatus === 'in-call' && (
+        <div style={{ position: 'fixed', bottom: '1rem', right: '1rem', background: theme.colors.surface, color: theme.colors.text, border: `1px solid ${theme.colors.border}`, borderRadius: '0.75rem', padding: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.75rem', zIndex: 9999 }}>
+          <audio ref={localAudioRef} autoPlay muted />
+          <audio ref={remoteAudioRef} autoPlay />
+          {callNote && <span style={{ fontSize: '0.8rem', color: theme.colors.textMuted }}>{callNote}</span>}
+          <button onClick={toggleMute} title={isMuted ? 'Unmute' : 'Mute'} style={{ padding: '0.5rem', borderRadius: '0.5rem', background: theme.colors.surface, border: `1px solid ${theme.colors.border}`, cursor: 'pointer', color: theme.colors.text }}>
+            {isMuted ? <MicOff size={18} /> : <Mic size={18} />}
+          </button>
+          <button onClick={endCall} title="End call" style={{ padding: '0.5rem', borderRadius: '0.5rem', background: '#ef4444', color: '#fff', border: 'none', cursor: 'pointer' }}>
+            <PhoneOff size={18} />
+          </button>
+        </div>
+      )}
+      
+      {showRoomDetails && currentRoom && (
+        <RoomDetails
+          room={{ name: currentRoom }}
+          onClose={() => setShowRoomDetails(false)}
+        />
+      )}
+    </div>
+  );
+};
+
+// Audio Player Component
+const AudioPlayer = ({ audioData, duration, theme }) => {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const audioRef = useRef(null);
+
+  useEffect(() => {
+    if (!audioRef.current) return;
+    const audio = audioRef.current;
+
+    const handleTimeUpdate = () => setCurrentTime(audio.currentTime);
+    const handleEnded = () => setIsPlaying(false);
+
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('ended', handleEnded);
+
+    return () => {
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('ended', handleEnded);
+    };
+  }, []);
+
+  const togglePlay = () => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+    } else {
+      audioRef.current.play();
+    }
+    setIsPlaying(!isPlaying);
+  };
+
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${String(secs).padStart(2, '0')}`;
+  };
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: '200px' }}>
+      <audio ref={audioRef} src={audioData} />
+      <button
+        onClick={togglePlay}
+        style={{
+          width: '36px',
+          height: '36px',
+          borderRadius: '50%',
+          border: 'none',
+          backgroundColor: 'rgba(255,255,255,0.2)',
+          color: 'inherit',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: 'pointer',
+          transition: 'all 0.2s ease'
+        }}
+      >
+        {isPlaying ? <Pause size={16} /> : <Play size={16} />}
+      </button>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+        <div style={{ width: '100%', height: '4px', borderRadius: '2px', backgroundColor: 'rgba(255,255,255,0.2)', overflow: 'hidden' }}>
+          <div
+            style={{
+              width: `${audioRef.current ? (currentTime / audioRef.current.duration) * 100 : 0}%`,
+              height: '100%',
+              backgroundColor: 'rgba(255,255,255,0.8)',
+              transition: 'width 0.1s linear'
+            }}
+          />
+        </div>
+        <div style={{ fontSize: '0.7rem', opacity: 0.8 }}>
+          {audioRef.current ? formatTime(currentTime) : '0:00'} / {formatTime(duration || 0)}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default ChatWindow;
+
