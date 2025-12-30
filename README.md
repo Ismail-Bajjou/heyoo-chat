@@ -9,8 +9,6 @@
 A modern, full-stack real-time chat application built with **React**, **Express**, **Socket.IO**, and **MongoDB**. Features instant messaging, room management, direct messages, friend system, and theme support.
 
 **👥 Built by**: Ismail Bajjou & Yassine Sarih  
-**📖 [Full Documentation](RAPPORT_PROJET.md)** — Comprehensive technical report with architecture, security, and features
-
 ---
 
 ## ✨ Features
@@ -270,11 +268,6 @@ git push origin main
 
 ---
 
-## 📖 Full Documentation
-
-For detailed technical documentation, architecture diagrams, security analysis, and feature specifications, see **[RAPPORT_PROJET.md](RAPPORT_PROJET.md)**.
-
----
 
 ## 🤝 Contributing
 
