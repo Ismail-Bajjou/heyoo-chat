@@ -132,7 +132,6 @@ heyoo-chat/
 │   └── package.json
 │
 ├── figures/               # Documentation images
-├── RAPPORT_PROJET.md      # Full technical documentation
 ├── README.md              # This file
 ├── .gitignore
 └── start.bat              # Windows launcher
